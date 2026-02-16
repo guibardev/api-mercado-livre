@@ -176,31 +176,20 @@ async function buscarTarifaVenda(item) {
 }
 
 async function buscarEnvios(item) {
-  if (typeof item.shipping_cost === 'number') {
-    return {
-      envioSelecionado: item.shipping_cost,
-      opcoes: []
-    }
-  }
-
-  if (item.shipping?.free_shipping) {
-    return {
-      envioSelecionado: 0,
-      opcoes: []
-    }
-  }
+  const fallbackEnvio =
+    typeof item.shipping_cost === 'number' ? item.shipping_cost : item.shipping?.free_shipping ? 0 : null
 
   // Itens fechados ou sem estoque costumam retornar 404 em shipping_options.
   if (item.status !== 'active' || Number(item.available_quantity || 0) <= 0) {
     return {
-      envioSelecionado: null,
+      envioSelecionado: fallbackEnvio,
       opcoes: []
     }
   }
 
   if (!cep.value) {
     return {
-      envioSelecionado: null,
+      envioSelecionado: fallbackEnvio,
       opcoes: []
     }
   }
@@ -208,7 +197,7 @@ async function buscarEnvios(item) {
   const resposta = await mlFetch(`/items/${item.id}/shipping_options?zip_code=${cep.value}`)
   if (!resposta.ok) {
     return {
-      envioSelecionado: null,
+      envioSelecionado: fallbackEnvio,
       opcoes: []
     }
   }
@@ -229,7 +218,7 @@ async function buscarEnvios(item) {
     opcoes.find((opcao) => opcao.display === 'recommended') ||
     opcoes[0] ||
     null
-  const envioSelecionado = opcaoSelecionada?.cost ?? opcaoSelecionada?.listCost ?? null
+  const envioSelecionado = opcaoSelecionada?.cost ?? opcaoSelecionada?.listCost ?? fallbackEnvio
 
   return {
     envioSelecionado,
