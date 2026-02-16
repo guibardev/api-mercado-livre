@@ -267,6 +267,7 @@ async function carregarAnuncios() {
           id: item.id,
           titulo: item.title,
           tipo: traduzirTipo(item.listing_type_id),
+          freteGratis: Boolean(item.shipping?.free_shipping),
           valorVenda: obterNumero(item.price),
           tarifaVenda: tarifaInfo?.saleFeeAmount ?? null,
           fixedFee: tarifaInfo?.fixedFee ?? null,
@@ -333,6 +334,7 @@ async function carregarAnuncios() {
             <th>ID</th>
             <th>Titulo</th>
             <th>Tipo</th>
+            <th>Frete gratis</th>
             <th>Valor da venda</th>
             <th>Tarifa ML</th>
             <th>Gross amount</th>
@@ -349,12 +351,13 @@ async function carregarAnuncios() {
         </thead>
         <tbody>
           <tr v-if="!carregando && anuncios.length === 0">
-            <td colspan="15">Nenhum anuncio carregado. Informe os dados e clique em buscar.</td>
+            <td colspan="16">Nenhum anuncio carregado. Informe os dados e clique em buscar.</td>
           </tr>
           <tr v-for="anuncio in anuncios" :key="anuncio.id">
             <td>{{ anuncio.id }}</td>
             <td>{{ anuncio.titulo }}</td>
             <td>{{ anuncio.tipo }}</td>
+            <td>{{ anuncio.freteGratis ? 'Sim' : 'Nao' }}</td>
             <td>{{ formatarMoeda(anuncio.valorVenda) }}</td>
             <td>{{ formatarMoeda(anuncio.tarifaVenda) }}</td>
             <td>{{ formatarMoeda(anuncio.grossAmount) }}</td>
@@ -389,7 +392,7 @@ async function carregarAnuncios() {
         </tbody>
         <tfoot v-if="anuncios.length > 0">
           <tr>
-            <td colspan="13">Total de margem de contribuicao</td>
+            <td colspan="14">Total de margem de contribuicao</td>
             <td class="destaque">{{ formatarMoeda(totalMargem) }}</td>
             <td></td>
           </tr>
@@ -459,7 +462,7 @@ h1 {
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 2100px;
+  min-width: 2220px;
 }
 
 th,
