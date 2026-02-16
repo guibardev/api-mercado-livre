@@ -61,9 +61,17 @@ watch(shopeeAccessToken, (novoToken) => {
   localStorage.setItem(SHOPEE_TOKEN_STORAGE_KEY, valor)
 })
 
-watch(tema, (novoTema) => {
-  localStorage.setItem(THEME_STORAGE_KEY, novoTema)
-})
+watch(
+  tema,
+  (novoTema) => {
+    localStorage.setItem(THEME_STORAGE_KEY, novoTema)
+    if (typeof document !== 'undefined') {
+      document.body.classList.toggle('app-light', novoTema === 'light')
+      document.body.classList.toggle('app-dark', novoTema === 'dark')
+    }
+  },
+  { immediate: true }
+)
 
 watch(aliquotaImposto, (novaAliquota) => {
   const valor = Number(novaAliquota)
@@ -525,8 +533,14 @@ async function carregarAnuncios() {
   <main class="container" :class="`theme-${tema}`">
     <div class="topbar">
       <h1>Simulador de Margem - Marketplace</h1>
-      <button class="theme-btn" type="button" @click="alternarTema">
-        {{ tema === 'dark' ? 'Ver Light' : 'Ver Dark' }}
+      <button
+        class="theme-btn lamp-toggle"
+        :class="{ on: tema === 'light' }"
+        type="button"
+        :aria-label="tema === 'dark' ? 'Ativar tema claro' : 'Ativar tema escuro'"
+        @click="alternarTema"
+      >
+        <span class="lamp-icon" aria-hidden="true"></span>
       </button>
     </div>
 
@@ -865,8 +879,9 @@ async function carregarAnuncios() {
 <style scoped>
 .container {
   width: 90vw;
-  margin: 0 5vw;
-  padding: 1.2rem 0;
+  margin: 1rem 5vw;
+  padding: 1.2rem 1rem;
+  border-radius: 10px;
   --panel-bg: #121416;
   --card-bg: rgba(25, 30, 34, 0.85);
   --card-border: #2d2d2d;
@@ -878,6 +893,9 @@ async function carregarAnuncios() {
   --error: #ff7b8c;
   --switch-off: #4a4f57;
   --text-main: #e6ebf2;
+  --surface-bg: #111317;
+  background: var(--surface-bg);
+  color: var(--text-main);
 }
 
 .theme-light {
@@ -892,11 +910,23 @@ async function carregarAnuncios() {
   --error: #c0262d;
   --switch-off: #b5bcc9;
   --text-main: #111827;
+  --surface-bg: #f3f6fb;
 }
 
 .theme-dark {
   --panel-bg: #121416;
   --card-bg: rgba(25, 30, 34, 0.85);
+  --surface-bg: #111317;
+}
+
+:global(body.app-light) {
+  background: #f3f6fb !important;
+  color: #111827 !important;
+}
+
+:global(body.app-dark) {
+  background: #111317 !important;
+  color: #e6ebf2 !important;
 }
 
 .topbar {
@@ -915,6 +945,48 @@ async function carregarAnuncios() {
   padding: 0 0.85rem;
   font-weight: 600;
   cursor: pointer;
+}
+
+.lamp-toggle {
+  width: 42px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+}
+
+.lamp-icon {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  position: relative;
+  opacity: 0.75;
+}
+
+.lamp-icon::before {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 3px;
+  border: 2px solid currentColor;
+  border-top: 0;
+  border-radius: 0 0 4px 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  top: 12px;
+}
+
+.lamp-toggle.on {
+  color: #f6a623;
+  box-shadow: 0 0 0 2px rgba(246, 166, 35, 0.25);
+}
+
+.lamp-toggle.on .lamp-icon {
+  background: #ffd77a;
+  box-shadow: 0 0 10px rgba(255, 196, 72, 0.85);
+  opacity: 1;
 }
 
 h1 {
@@ -1200,7 +1272,8 @@ tfoot td {
 @media (max-width: 1280px) {
   .container {
     width: 94vw;
-    margin: 0 3vw;
+    margin: 0.75rem 3vw;
+    padding: 1rem 0.85rem;
   }
 
   h1 {
