@@ -3,6 +3,8 @@ import { computed, ref, watch } from 'vue'
 
 const siteId = ref('MLB')
 const sellerId = ref('2278946593')
+const marketplace = ref('ml')
+const shopeeShopId = ref('')
 const cep = ref('01001000')
 const limite = ref(20)
 const carregando = ref(false)
@@ -11,12 +13,18 @@ const anuncios = ref([])
 const IDS_TESTE = ['MLB5321650590', 'MLB5321611740', 'MLB5321244626']
 
 const TOKEN_STORAGE_KEY = 'ml_access_token'
+const SHOPEE_TOKEN_STORAGE_KEY = 'shopee_access_token'
 const TAX_RATE_STORAGE_KEY = 'ml_tax_rate'
 const COSTS_STORAGE_KEY = 'ml_product_costs'
+const FREIGHTS_STORAGE_KEY = 'ml_freight_simulation'
+const THEME_STORAGE_KEY = 'ui_theme'
 
 const accessToken = ref(localStorage.getItem(TOKEN_STORAGE_KEY) || '')
+const shopeeAccessToken = ref(localStorage.getItem(SHOPEE_TOKEN_STORAGE_KEY) || '')
 const aliquotaImposto = ref(Number(localStorage.getItem(TAX_RATE_STORAGE_KEY) || 12))
 const custoProdutosById = ref(JSON.parse(localStorage.getItem(COSTS_STORAGE_KEY) || '{}'))
+const freteSimuladoById = ref(JSON.parse(localStorage.getItem(FREIGHTS_STORAGE_KEY) || '{}'))
+const tema = ref(localStorage.getItem(THEME_STORAGE_KEY) || 'dark')
 const API_BASE = import.meta.env.DEV ? '/ml' : 'https://api.mercadolibre.com'
 
 const filtroTipo = ref('todos')
@@ -44,6 +52,19 @@ watch(accessToken, (novoToken) => {
   localStorage.setItem(TOKEN_STORAGE_KEY, valor)
 })
 
+watch(shopeeAccessToken, (novoToken) => {
+  const valor = novoToken.trim()
+  if (!valor) {
+    localStorage.removeItem(SHOPEE_TOKEN_STORAGE_KEY)
+    return
+  }
+  localStorage.setItem(SHOPEE_TOKEN_STORAGE_KEY, valor)
+})
+
+watch(tema, (novoTema) => {
+  localStorage.setItem(THEME_STORAGE_KEY, novoTema)
+})
+
 watch(aliquotaImposto, (novaAliquota) => {
   const valor = Number(novaAliquota)
   if (!Number.isFinite(valor) || valor < 0) {
@@ -57,6 +78,14 @@ watch(
   custoProdutosById,
   (novoMapa) => {
     localStorage.setItem(COSTS_STORAGE_KEY, JSON.stringify(novoMapa))
+  },
+  { deep: true }
+)
+
+watch(
+  freteSimuladoById,
+  (novoMapa) => {
+    localStorage.setItem(FREIGHTS_STORAGE_KEY, JSON.stringify(novoMapa))
   },
   { deep: true }
 )
@@ -88,21 +117,43 @@ function atualizarCustoProduto(itemId, valorDigitado) {
   custoProdutosById.value[itemId] = Number.isFinite(valor) && valor >= 0 ? valor : 0
 }
 
+function obterFreteSimulado(itemId) {
+  const valor = Number(freteSimuladoById.value[itemId])
+  return Number.isFinite(valor) && valor >= 0 ? valor : null
+}
+
+function atualizarFreteSimulado(itemId, valorDigitado) {
+  const texto = String(valorDigitado || '').trim()
+  if (texto === '') {
+    delete freteSimuladoById.value[itemId]
+    return
+  }
+  const valor = Number(texto)
+  freteSimuladoById.value[itemId] = Number.isFinite(valor) && valor >= 0 ? valor : null
+}
+
+function obterFreteUsado(anuncio) {
+  const simulado = obterFreteSimulado(anuncio.id)
+  if (typeof simulado === 'number') return simulado
+  return anuncio.envios
+}
+
 function calcularImpostoProduto(anuncio) {
   if (typeof anuncio.valorVenda !== 'number') return null
   return anuncio.valorVenda * (Number(aliquotaImposto.value || 0) / 100)
 }
 
 function calcularTotalLiquido(anuncio) {
+  const freteUsado = obterFreteUsado(anuncio)
   if (
     typeof anuncio.valorVenda !== 'number' ||
     typeof anuncio.tarifaVenda !== 'number' ||
-    typeof anuncio.envios !== 'number'
+    typeof freteUsado !== 'number'
   ) {
     return null
   }
 
-  return anuncio.valorVenda - anuncio.tarifaVenda - anuncio.envios
+  return anuncio.valorVenda - anuncio.tarifaVenda - freteUsado
 }
 
 function calcularMargemContribuicao(anuncio) {
@@ -144,6 +195,7 @@ function indicadorOrdenacao(chave) {
 
 function valorOrdenavel(row, chave) {
   if (chave === 'custoProduto') return obterCustoProduto(row.id)
+  if (chave === 'freteUsado') return obterFreteUsado(row)
   return row[chave]
 }
 
@@ -220,6 +272,99 @@ const percentualFreteGratis = computed(() => {
   const gratis = linhasFiltradasOrdenadas.value.filter((linha) => linha.freteGratis).length
   return (gratis / total) * 100
 })
+
+// Shopee manual calculator (no API integration required)
+const modoShopee = ref('verificar_lucro')
+const shopeeCustoProduto = ref(0)
+const shopeeCustoOperacional = ref(0)
+const shopeeImpostosOutrosPercent = ref(0)
+const shopeePrecoVenda = ref(0)
+const shopeeMargemDesejadaPercent = ref(20)
+const shopeeTaxaComissaoPercent = ref(20)
+const shopeeTaxasAdicionaisPercent = ref(0)
+const shopeePagamentoPix = ref(false)
+const shopeeSubsidioPixPercent = ref(0)
+const shopeeCupomFreteGratis = ref(false)
+const shopeeValorFreteCupom = ref(0)
+const shopeeVaiRodarAds = ref(false)
+const shopeeRoas = ref(1)
+
+const shopeeTaxaFixa = computed(() => (Number(shopeePrecoVenda.value || 0) <= 79.99 ? 4 : 0))
+const shopeeComissaoValor = computed(
+  () => (Number(shopeePrecoVenda.value || 0) * Number(shopeeTaxaComissaoPercent.value || 0)) / 100
+)
+const shopeeTaxasAdicionaisValor = computed(
+  () => (Number(shopeePrecoVenda.value || 0) * Number(shopeeTaxasAdicionaisPercent.value || 0)) / 100
+)
+const shopeeImpostosValor = computed(
+  () => (Number(shopeePrecoVenda.value || 0) * Number(shopeeImpostosOutrosPercent.value || 0)) / 100
+)
+const shopeeSubsidioPixValor = computed(() =>
+  shopeePagamentoPix.value
+    ? (Number(shopeePrecoVenda.value || 0) * Number(shopeeSubsidioPixPercent.value || 0)) / 100
+    : 0
+)
+const shopeeCoparticipacaoCupomValor = computed(() =>
+  shopeeCupomFreteGratis.value ? Number(shopeeValorFreteCupom.value || 0) * 0.25 : 0
+)
+const shopeeCustoAdsValor = computed(() =>
+  shopeeVaiRodarAds.value && Number(shopeeRoas.value) > 0
+    ? Number(shopeePrecoVenda.value || 0) / Number(shopeeRoas.value)
+    : 0
+)
+const shopeeTaxasTotais = computed(
+  () =>
+    shopeeComissaoValor.value +
+    shopeeTaxaFixa.value +
+    shopeeTaxasAdicionaisValor.value +
+    shopeeImpostosValor.value +
+    shopeeCoparticipacaoCupomValor.value +
+    shopeeCustoAdsValor.value -
+    shopeeSubsidioPixValor.value
+)
+const shopeeLucroLiquido = computed(
+  () =>
+    Number(shopeePrecoVenda.value || 0) -
+    Number(shopeeCustoProduto.value || 0) -
+    Number(shopeeCustoOperacional.value || 0) -
+    shopeeTaxasTotais.value
+)
+const shopeeMargemLiquida = computed(() => {
+  const preco = Number(shopeePrecoVenda.value || 0)
+  if (!preco) return 0
+  return (shopeeLucroLiquido.value / preco) * 100
+})
+const shopeePrecoSugerido = computed(() => {
+  const comissao = Number(shopeeTaxaComissaoPercent.value || 0) / 100
+  const taxasAdic = Number(shopeeTaxasAdicionaisPercent.value || 0) / 100
+  const impostos = Number(shopeeImpostosOutrosPercent.value || 0) / 100
+  const margemMeta = Number(shopeeMargemDesejadaPercent.value || 0) / 100
+  const subsidioPix = shopeePagamentoPix.value
+    ? Number(shopeeSubsidioPixPercent.value || 0) / 100
+    : 0
+  const adsPercent =
+    shopeeVaiRodarAds.value && Number(shopeeRoas.value) > 0 ? 1 / Number(shopeeRoas.value) : 0
+
+  const baseFixa =
+    Number(shopeeCustoProduto.value || 0) +
+    Number(shopeeCustoOperacional.value || 0) +
+    shopeeCoparticipacaoCupomValor.value
+
+  const percentualTotal = comissao + taxasAdic + impostos + margemMeta + adsPercent - subsidioPix
+  if (percentualTotal >= 1) return 0
+
+  // tentativa na faixa com taxa fixa de R$4,00
+  let sugestao = (baseFixa + 4) / (1 - percentualTotal)
+  if (sugestao > 79.99) {
+    // acima de R$79,99 remove taxa fixa
+    sugestao = baseFixa / (1 - percentualTotal)
+  }
+  return sugestao > 0 ? sugestao : 0
+})
+
+function alternarTema() {
+  tema.value = tema.value === 'dark' ? 'light' : 'dark'
+}
 
 async function parseErroResposta(resposta, padrao) {
   try {
@@ -322,42 +467,52 @@ async function buscarItensAutenticado() {
     : []
 }
 
-async function carregarAnuncios() {
-  if (!sellerId.value.trim()) {
-    erro.value = 'Informe o Seller ID.'
-    return
-  }
-  if (!accessToken.value.trim()) {
-    erro.value = 'Informe o Access Token.'
-    return
-  }
+async function carregarAnunciosMercadoLivre() {
+  const resultados = await buscarItensAutenticado()
 
+  return Promise.all(
+    resultados.map(async (item) => {
+      const [tarifaInfo, envioInfo] = await Promise.all([buscarTarifaVenda(item), buscarEnvios(item)])
+
+      return {
+        id: item.id,
+        titulo: item.title,
+        tipo: traduzirTipo(item.listing_type_id),
+        freteGratis: Boolean(item.shipping?.free_shipping),
+        valorVenda: obterNumero(item.price),
+        tarifaVenda: tarifaInfo?.saleFeeAmount ?? null,
+        fixedFee: tarifaInfo?.fixedFee ?? null,
+        grossAmount: tarifaInfo?.grossAmount ?? null,
+        percentageFee: tarifaInfo?.percentageFee ?? null,
+        envios: obterNumero(envioInfo.envioSelecionado),
+        freteOpcoes: envioInfo.opcoes
+      }
+    })
+  )
+}
+
+async function carregarAnunciosShopee() {
+  return []
+}
+
+async function carregarAnuncios() {
   erro.value = ''
   carregando.value = true
   anuncios.value = []
 
   try {
-    const resultados = await buscarItensAutenticado()
-
-    anuncios.value = await Promise.all(
-      resultados.map(async (item) => {
-        const [tarifaInfo, envioInfo] = await Promise.all([buscarTarifaVenda(item), buscarEnvios(item)])
-
-        return {
-          id: item.id,
-          titulo: item.title,
-          tipo: traduzirTipo(item.listing_type_id),
-          freteGratis: Boolean(item.shipping?.free_shipping),
-          valorVenda: obterNumero(item.price),
-          tarifaVenda: tarifaInfo?.saleFeeAmount ?? null,
-          fixedFee: tarifaInfo?.fixedFee ?? null,
-          grossAmount: tarifaInfo?.grossAmount ?? null,
-          percentageFee: tarifaInfo?.percentageFee ?? null,
-          envios: obterNumero(envioInfo.envioSelecionado),
-          freteOpcoes: envioInfo.opcoes
-        }
-      })
-    )
+    if (marketplace.value === 'ml') {
+      if (!sellerId.value.trim()) {
+        throw new Error('Informe o Seller ID.')
+      }
+      if (!accessToken.value.trim()) {
+        throw new Error('Informe o Access Token.')
+      }
+      anuncios.value = await carregarAnunciosMercadoLivre()
+    } else {
+      erro.value = ''
+      anuncios.value = await carregarAnunciosShopee()
+    }
   } catch (e) {
     erro.value = e instanceof Error ? e.message : 'Erro inesperado ao buscar anuncios.'
   } finally {
@@ -367,40 +522,160 @@ async function carregarAnuncios() {
 </script>
 
 <template>
-  <main class="container">
-    <h1>Anuncios Mercado Livre - Simulador</h1>
+  <main class="container" :class="`theme-${tema}`">
+    <div class="topbar">
+      <h1>Simulador de Margem - Marketplace</h1>
+      <button class="theme-btn" type="button" @click="alternarTema">
+        {{ tema === 'dark' ? 'Ver Light' : 'Ver Dark' }}
+      </button>
+    </div>
 
     <form class="filtros" @submit.prevent="carregarAnuncios">
       <label>
+        Marketplace
+        <select v-model="marketplace">
+          <option value="ml">Mercado Livre</option>
+          <option value="shopee">Shopee</option>
+        </select>
+      </label>
+      <label v-if="marketplace === 'ml'">
         Seller ID
         <input v-model="sellerId" type="text" placeholder="Ex.: 2278946593" />
       </label>
-      <label>
-        Access Token
-        <input v-model="accessToken" type="password" autocomplete="off" placeholder="APP_USR-..." />
+      <label v-else>
+        Shop ID
+        <input v-model="shopeeShopId" type="text" placeholder="Ex.: 123456789" />
       </label>
       <label>
+        {{ marketplace === 'ml' ? 'Access Token ML' : 'Access Token Shopee' }}
+        <input
+          v-if="marketplace === 'ml'"
+          v-model="accessToken"
+          type="password"
+          autocomplete="off"
+          placeholder="APP_USR-..."
+        />
+        <input
+          v-else
+          v-model="shopeeAccessToken"
+          type="password"
+          autocomplete="off"
+          placeholder="Shopee token"
+        />
+      </label>
+      <label v-if="marketplace === 'ml'">
         Site
         <input v-model="siteId" type="text" />
       </label>
-      <label>
+      <label v-if="marketplace === 'ml'">
         CEP (envio)
         <input v-model="cep" type="text" placeholder="Ex.: 01001000" />
       </label>
-      <label>
+      <label v-if="marketplace === 'ml'">
         Limite
         <input v-model.number="limite" type="number" min="1" max="50" />
       </label>
-      <label>
+      <label v-if="marketplace === 'ml'">
         Imposto %
         <input v-model.number="aliquotaImposto" type="number" min="0" step="0.01" />
       </label>
       <button type="submit" :disabled="carregando">
-        {{ carregando ? 'Carregando...' : 'Buscar anuncios' }}
+        {{ carregando ? 'Carregando...' : marketplace === 'ml' ? 'Buscar anuncios' : 'Atualizar calculo' }}
       </button>
     </form>
 
-    <section class="kpis" v-if="linhasFiltradasOrdenadas.length">
+    <section v-if="marketplace === 'shopee'" class="shopee-grid">
+      <article class="shopee-card">
+        <h3>Dados do produto</h3>
+        <label>
+          Custo do produto (R$)
+          <input v-model.number="shopeeCustoProduto" type="number" min="0" step="0.01" />
+        </label>
+        <label>
+          Custo operacional / pedido (R$)
+          <input v-model.number="shopeeCustoOperacional" type="number" min="0" step="0.01" />
+        </label>
+        <label>
+          Impostos / outros (%)
+          <input v-model.number="shopeeImpostosOutrosPercent" type="number" min="0" step="0.01" />
+        </label>
+        <label>
+          Preco de venda (R$)
+          <input v-model.number="shopeePrecoVenda" type="number" min="0" step="0.01" />
+        </label>
+      </article>
+
+      <article class="shopee-card">
+        <h3>Taxas</h3>
+        <label>
+          Comissao Shopee (%)
+          <input v-model.number="shopeeTaxaComissaoPercent" type="number" min="0" step="0.01" />
+        </label>
+        <label>
+          Taxas adicionais (%)
+          <input v-model.number="shopeeTaxasAdicionaisPercent" type="number" min="0" step="0.01" />
+        </label>
+        <label>
+          Margem desejada (%)
+          <input v-model.number="shopeeMargemDesejadaPercent" type="number" min="0" step="0.01" />
+        </label>
+        <p class="calc-line">Taxa fixa: <strong>{{ formatarMoeda(shopeeTaxaFixa) }}</strong></p>
+      </article>
+
+      <article class="shopee-card">
+        <h3>Opcoes</h3>
+        <label class="opt-line switch-row">
+          <span class="opt-text">Pagamento via Pix</span>
+          <span class="switch">
+            <input v-model="shopeePagamentoPix" class="switch-input" type="checkbox" />
+            <span class="switch-slider"></span>
+          </span>
+        </label>
+        <label v-if="shopeePagamentoPix">
+          Subsidio Pix (%)
+          <input v-model.number="shopeeSubsidioPixPercent" type="number" min="0" step="0.01" />
+        </label>
+        <label class="opt-line switch-row">
+          <span class="opt-text">Cupom frete gratis</span>
+          <span class="switch">
+            <input v-model="shopeeCupomFreteGratis" class="switch-input" type="checkbox" />
+            <span class="switch-slider"></span>
+          </span>
+        </label>
+        <label v-if="shopeeCupomFreteGratis">
+          Valor frete do cupom (R$)
+          <input v-model.number="shopeeValorFreteCupom" type="number" min="0" step="0.01" />
+        </label>
+        <label class="opt-line switch-row">
+          <span class="opt-text">Vai rodar Shopee Ads</span>
+          <span class="switch">
+            <input v-model="shopeeVaiRodarAds" class="switch-input" type="checkbox" />
+            <span class="switch-slider"></span>
+          </span>
+        </label>
+        <label v-if="shopeeVaiRodarAds">
+          ROAS
+          <input v-model.number="shopeeRoas" type="number" min="0.01" step="0.01" />
+        </label>
+      </article>
+
+      <article class="shopee-card shopee-result">
+        <h3>Resultado</h3>
+        <p>Valor final da venda: <strong>{{ formatarMoeda(shopeePrecoVenda) }}</strong></p>
+        <p>Taxas Shopee: <strong>{{ formatarMoeda(shopeeTaxasTotais) }}</strong></p>
+        <p>Lucro liquido: <strong>{{ formatarMoeda(shopeeLucroLiquido) }}</strong></p>
+        <p>Margem liquida: <strong>{{ formatarPercentual(shopeeMargemLiquida) }}</strong></p>
+        <p>Preco sugerido: <strong>{{ formatarMoeda(shopeePrecoSugerido) }}</strong></p>
+        <p class="calc-line">Comissao: {{ formatarMoeda(shopeeComissaoValor) }}</p>
+        <p class="calc-line">Taxas adicionais: {{ formatarMoeda(shopeeTaxasAdicionaisValor) }}</p>
+        <p class="calc-line">Impostos: {{ formatarMoeda(shopeeImpostosValor) }}</p>
+        <p class="calc-line">Subsidio Pix: {{ formatarMoeda(shopeeSubsidioPixValor) }}</p>
+        <p class="calc-line">Coparticipacao cupom: {{ formatarMoeda(shopeeCoparticipacaoCupomValor) }}</p>
+        <p class="calc-line">Custo Ads: {{ formatarMoeda(shopeeCustoAdsValor) }}</p>
+      </article>
+    </section>
+
+    <section class="kpis" v-if="marketplace === 'ml' && linhasFiltradasOrdenadas.length">
       <article class="kpi-card">
         <span>Margem total</span>
         <strong>{{ formatarMoeda(totalMargem) }}</strong>
@@ -419,7 +694,7 @@ async function carregarAnuncios() {
       </article>
     </section>
 
-    <section class="filtros-rapidos">
+    <section class="filtros-rapidos" v-if="marketplace === 'ml'">
       <label>
         Tipo
         <select v-model="filtroTipo">
@@ -445,7 +720,7 @@ async function carregarAnuncios() {
 
     <p v-if="erro" class="erro">{{ erro }}</p>
 
-    <div class="table-wrap desktop-only">
+    <div class="table-wrap desktop-only" v-if="marketplace === 'ml'">
       <table>
         <thead>
           <tr>
@@ -471,6 +746,9 @@ async function carregarAnuncios() {
             <th>
               <button class="sort-btn" @click="trocarOrdenacao('envios')">Envios {{ indicadorOrdenacao('envios') }}</button>
             </th>
+            <th>
+              <button class="sort-btn" @click="trocarOrdenacao('freteUsado')">Frete usado {{ indicadorOrdenacao('freteUsado') }}</button>
+            </th>
             <th>Fretes</th>
             <th>
               <button class="sort-btn" @click="trocarOrdenacao('totalLiquido')">Total liquido {{ indicadorOrdenacao('totalLiquido') }}</button>
@@ -489,7 +767,7 @@ async function carregarAnuncios() {
         </thead>
         <tbody>
           <tr v-if="!carregando && linhasFiltradasOrdenadas.length === 0">
-            <td colspan="16">Nenhum anuncio para os filtros aplicados.</td>
+            <td colspan="17">Nenhum anuncio para os filtros aplicados.</td>
           </tr>
           <tr v-for="linha in linhasFiltradasOrdenadas" :key="linha.id">
             <td class="sticky-col">{{ linha.id }}</td>
@@ -502,6 +780,18 @@ async function carregarAnuncios() {
             <td>{{ formatarMoeda(linha.fixedFee) }}</td>
             <td>{{ formatarPercentual(linha.percentageFee) }}</td>
             <td>{{ formatarMoeda(linha.envios) }}</td>
+            <td>
+              <input
+                class="input-custo"
+                type="number"
+                min="0"
+                step="0.01"
+                :value="obterFreteSimulado(linha.id) ?? ''"
+                placeholder="API"
+                @input="atualizarFreteSimulado(linha.id, $event.target.value)"
+              />
+              <div class="frete-api">API: {{ formatarMoeda(linha.envios) }}</div>
+            </td>
             <td>
               <details v-if="linha.freteOpcoes?.length" class="fretes-detalhe">
                 <summary>{{ linha.freteOpcoes.length }} opcoes</summary>
@@ -531,7 +821,7 @@ async function carregarAnuncios() {
         </tbody>
         <tfoot v-if="linhasFiltradasOrdenadas.length > 0">
           <tr>
-            <td colspan="14">Total de margem de contribuicao (filtros atuais)</td>
+            <td colspan="15">Total de margem de contribuicao (filtros atuais)</td>
             <td class="margem-boa">{{ formatarMoeda(totalMargem) }}</td>
             <td></td>
           </tr>
@@ -539,7 +829,7 @@ async function carregarAnuncios() {
       </table>
     </div>
 
-    <div class="mobile-only cards-wrap" v-if="linhasFiltradasOrdenadas.length > 0">
+    <div class="mobile-only cards-wrap" v-if="marketplace === 'ml' && linhasFiltradasOrdenadas.length > 0">
       <article class="mobile-card" v-for="linha in linhasFiltradasOrdenadas" :key="`m-${linha.id}`">
         <h3>{{ linha.titulo }}</h3>
         <p><strong>ID:</strong> {{ linha.id }}</p>
@@ -547,7 +837,20 @@ async function carregarAnuncios() {
         <p><strong>Frete gratis:</strong> {{ linha.freteGratis ? 'Sim' : 'Nao' }}</p>
         <p><strong>Valor venda:</strong> {{ formatarMoeda(linha.valorVenda) }}</p>
         <p><strong>Tarifa ML:</strong> {{ formatarMoeda(linha.tarifaVenda) }}</p>
-        <p><strong>Envios:</strong> {{ formatarMoeda(linha.envios) }}</p>
+        <p><strong>Envios (API):</strong> {{ formatarMoeda(linha.envios) }}</p>
+        <p><strong>Frete usado:</strong> {{ formatarMoeda(obterFreteUsado(linha)) }}</p>
+        <p>
+          <strong>Frete simulado:</strong>
+          <input
+            class="input-custo"
+            type="number"
+            min="0"
+            step="0.01"
+            :value="obterFreteSimulado(linha.id) ?? ''"
+            placeholder="API"
+            @input="atualizarFreteSimulado(linha.id, $event.target.value)"
+          />
+        </p>
         <p><strong>Total liquido:</strong> {{ formatarMoeda(linha.totalLiquido) }}</p>
         <p><strong>Imposto:</strong> {{ formatarMoeda(linha.impostoProduto) }}</p>
         <p :class="classeMargem(linha.margemContribuicao)">
@@ -564,11 +867,60 @@ async function carregarAnuncios() {
   width: 90vw;
   margin: 0 5vw;
   padding: 1.2rem 0;
+  --panel-bg: #121416;
+  --card-bg: rgba(25, 30, 34, 0.85);
+  --card-border: #2d2d2d;
+  --line: #30343a;
+  --header-bg: #dde3ec;
+  --header-fg: #101827;
+  --input-border: #cfcfcf;
+  --muted: #9aa4b2;
+  --error: #ff7b8c;
+  --switch-off: #4a4f57;
+  --text-main: #e6ebf2;
+}
+
+.theme-light {
+  --panel-bg: #ffffff;
+  --card-bg: #f7f9fc;
+  --card-border: #d6dce8;
+  --line: #e4e8f0;
+  --header-bg: #ecf1f8;
+  --header-fg: #152033;
+  --input-border: #cfd7e4;
+  --muted: #5f6f86;
+  --error: #c0262d;
+  --switch-off: #b5bcc9;
+  --text-main: #111827;
+}
+
+.theme-dark {
+  --panel-bg: #121416;
+  --card-bg: rgba(25, 30, 34, 0.85);
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.theme-btn {
+  height: 36px;
+  border: 1px solid var(--input-border);
+  background: transparent;
+  color: var(--text-main);
+  border-radius: 999px;
+  padding: 0 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 h1 {
-  margin-bottom: 1rem;
+  margin-bottom: 0.8rem;
   font-size: 1.5rem;
+  color: var(--text-main);
 }
 
 .filtros,
@@ -618,17 +970,119 @@ h1 {
   margin-bottom: 1rem;
 }
 
-.kpi-card {
-  border: 1px solid #2d2d2d;
+.shopee-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(260px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.shopee-card {
+  border: 1px solid var(--card-border);
   border-radius: 8px;
   padding: 0.75rem;
-  background: rgba(25, 30, 34, 0.85);
+  background: var(--card-bg);
+  display: grid;
+  gap: 0.55rem;
+}
+
+.shopee-card h3 {
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.shopee-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.86rem;
+}
+
+.shopee-card input {
+  height: 36px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  padding: 0 0.65rem;
+}
+
+.opt-line {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.switch-row {
+  justify-content: space-between;
+}
+
+.opt-text {
+  font-size: 0.9rem;
+}
+
+.switch {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  display: inline-flex;
+}
+
+.switch-input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.switch-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--switch-off);
+  border-radius: 999px;
+  transition: 0.2s ease;
+  cursor: pointer;
+}
+
+.switch-slider::before {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: 0.2s ease;
+}
+
+.switch-input:checked + .switch-slider {
+  background: #f2742b;
+}
+
+.switch-input:checked + .switch-slider::before {
+  transform: translateX(20px);
+}
+
+.shopee-result p {
+  margin: 0;
+}
+
+.calc-line {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.kpi-card {
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  background: var(--card-bg);
 }
 
 .kpi-card span {
   display: block;
   font-size: 0.8rem;
-  color: #b9bec7;
+  color: var(--muted);
 }
 
 .kpi-card strong {
@@ -639,13 +1093,13 @@ h1 {
 
 .erro {
   margin-bottom: 0.75rem;
-  color: #ff7b8c;
+  color: var(--error);
 }
 
 .table-wrap {
   overflow: auto;
   max-height: 64vh;
-  border: 1px solid #3a3a3a;
+  border: 1px solid var(--card-border);
   border-radius: 8px;
 }
 
@@ -659,18 +1113,18 @@ table {
 th,
 td {
   padding: 0.65rem;
-  border-bottom: 1px solid #30343a;
+  border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: middle;
-  background: #121416;
+  background: var(--panel-bg);
 }
 
 thead th {
   position: sticky;
   top: 0;
   z-index: 2;
-  background: #dde3ec;
-  color: #101827;
+  background: var(--header-bg);
+  color: var(--header-fg);
   font-weight: 700;
 }
 
@@ -678,13 +1132,13 @@ thead th {
   position: sticky;
   left: 0;
   z-index: 1;
-  background: #161a1f;
+  background: var(--panel-bg);
 }
 
 thead .sticky-col {
   z-index: 3;
-  background: #cfd7e4;
-  color: #101827;
+  background: var(--header-bg);
+  color: var(--header-fg);
 }
 
 .sort-btn {
@@ -694,16 +1148,22 @@ thead .sticky-col {
 }
 
 tfoot td {
-  background: #1a2028;
+  background: var(--card-bg);
   font-weight: 700;
 }
 
 .input-custo {
   width: 115px;
   height: 32px;
-  border: 1px solid #cfcfcf;
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   padding: 0 0.5rem;
+}
+
+.frete-api {
+  margin-top: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--muted);
 }
 
 .fretes-detalhe summary {
@@ -769,10 +1229,10 @@ tfoot td {
     gap: 0.75rem;
   }
 
-  .mobile-card {
-    border: 1px solid #343a43;
+.mobile-card {
+    border: 1px solid var(--card-border);
     border-radius: 8px;
-    background: #121416;
+    background: var(--panel-bg);
     padding: 0.75rem;
   }
 
@@ -796,6 +1256,10 @@ tfoot td {
   .filtros,
   .filtros-rapidos,
   .kpis {
+    grid-template-columns: 1fr;
+  }
+
+  .shopee-grid {
     grid-template-columns: 1fr;
   }
 }
