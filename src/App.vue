@@ -17,6 +17,7 @@ const COSTS_STORAGE_KEY = 'ml_product_costs'
 const accessToken = ref(localStorage.getItem(TOKEN_STORAGE_KEY) || '')
 const aliquotaImposto = ref(Number(localStorage.getItem(TAX_RATE_STORAGE_KEY) || 12))
 const custoProdutosById = ref(JSON.parse(localStorage.getItem(COSTS_STORAGE_KEY) || '{}'))
+const API_BASE = import.meta.env.DEV ? '/ml' : 'https://api.mercadolibre.com'
 
 const mapaTipos = {
   free: 'Gratis',
@@ -128,12 +129,23 @@ async function parseErroResposta(resposta, padrao) {
 }
 
 async function mlFetch(url) {
-  const headers = {}
-  if (accessToken.value.trim()) {
-    headers.Authorization = `Bearer ${accessToken.value.trim()}`
+  const token = accessToken.value.trim()
+  const alvo = import.meta.env.DEV ? `${API_BASE}${url}` : new URL(`${API_BASE}${url}`)
+
+  if (alvo instanceof URL && token) {
+    // Em producao (GitHub Pages), evita CORS de header custom usando query param.
+    alvo.searchParams.set('access_token', token)
   }
 
-  return fetch(url, { headers })
+  if (import.meta.env.DEV) {
+    const headers = {}
+    if (token) {
+      headers.Authorization = `Bearer ${token}`
+    }
+    return fetch(alvo, { headers })
+  }
+
+  return fetch(alvo.toString())
 }
 
 async function buscarTarifaVenda(item) {
@@ -147,7 +159,7 @@ async function buscarTarifaVenda(item) {
     category_id: item.category_id
   })
 
-  const resposta = await mlFetch(`/ml/sites/${siteId.value}/listing_prices?${params.toString()}`)
+  const resposta = await mlFetch(`/sites/${siteId.value}/listing_prices?${params.toString()}`)
   if (!resposta.ok) return null
 
   const dados = await resposta.json()
@@ -193,7 +205,7 @@ async function buscarEnvios(item) {
     }
   }
 
-  const resposta = await mlFetch(`/ml/items/${item.id}/shipping_options?zip_code=${cep.value}`)
+  const resposta = await mlFetch(`/items/${item.id}/shipping_options?zip_code=${cep.value}`)
   if (!resposta.ok) {
     return {
       envioSelecionado: null,
@@ -226,7 +238,7 @@ async function buscarEnvios(item) {
 }
 
 async function buscarItensAutenticado() {
-  const respostaItens = await mlFetch(`/ml/items?ids=${IDS_TESTE.join(',')}`)
+  const respostaItens = await mlFetch(`/items?ids=${IDS_TESTE.join(',')}`)
   if (!respostaItens.ok) {
     const detalhe = await parseErroResposta(
       respostaItens,
