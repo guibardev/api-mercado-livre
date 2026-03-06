@@ -2,11 +2,10 @@
 import { computed, ref, watch } from 'vue'
 
 const siteId = ref('MLB')
-const sellerId = ref('2278946593')
+const sellerId = ref('2326962319')
 const marketplace = ref('ml')
 const shopeeShopId = ref('')
 const cep = ref('01001000')
-const limite = ref(20)
 const carregando = ref(false)
 const erro = ref('')
 const anuncios = ref([])
@@ -18,7 +17,7 @@ const COSTS_STORAGE_KEY = 'ml_product_costs'
 const FREIGHTS_STORAGE_KEY = 'ml_freight_simulation'
 const THEME_STORAGE_KEY = 'ui_theme'
 
-const accessToken = ref(localStorage.getItem(TOKEN_STORAGE_KEY) || '')
+const accessToken = ref('APP_USR-7222342522058077-030616-3ea319770fa421f3bcc17425dad5632d-2326962319')
 const shopeeAccessToken = ref(localStorage.getItem(SHOPEE_TOKEN_STORAGE_KEY) || '')
 const aliquotaImposto = ref(Number(localStorage.getItem(TAX_RATE_STORAGE_KEY) || 12))
 const custoProdutosById = ref(JSON.parse(localStorage.getItem(COSTS_STORAGE_KEY) || '{}'))
@@ -41,15 +40,6 @@ const mapaTipos = {
   gold_special: 'Premium',
   gold_premium: 'Premium Plus'
 }
-
-watch(accessToken, (novoToken) => {
-  const valor = novoToken.trim()
-  if (!valor) {
-    localStorage.removeItem(TOKEN_STORAGE_KEY)
-    return
-  }
-  localStorage.setItem(TOKEN_STORAGE_KEY, valor)
-})
 
 watch(shopeeAccessToken, (novoToken) => {
   const valor = novoToken.trim()
@@ -462,33 +452,60 @@ async function buscarEnvios(item) {
 }
 
 async function buscarIdsAnunciosVendedor() {
-  const limiteNormalizado = Math.min(Math.max(Number(limite.value) || 20, 1), 50)
   const seller = sellerId.value.trim()
-  const respostaIds = await mlFetch(`/users/${seller}/items/search?limit=${limiteNormalizado}`)
+  const limitePagina = 50
+  let offset = 0
+  let total = null
+  const ids = []
 
-  if (!respostaIds.ok) {
-    const detalhe = await parseErroResposta(respostaIds, 'Nao foi possivel carregar os anuncios do vendedor.')
-    throw new Error(detalhe)
+  while (total === null || offset < total) {
+    const respostaIds = await mlFetch(
+      `/users/${seller}/items/search?limit=${limitePagina}&offset=${offset}`
+    )
+
+    if (!respostaIds.ok) {
+      const detalhe = await parseErroResposta(respostaIds, 'Nao foi possivel carregar os anuncios do vendedor.')
+      throw new Error(detalhe)
+    }
+
+    const dadosIds = await respostaIds.json()
+    const resultadosPagina = Array.isArray(dadosIds?.results) ? dadosIds.results : []
+    ids.push(...resultadosPagina)
+
+    total = Number(dadosIds?.paging?.total)
+    if (!Number.isFinite(total)) break
+    offset += resultadosPagina.length
+    if (!resultadosPagina.length) break
   }
 
-  const dadosIds = await respostaIds.json()
-  return Array.isArray(dadosIds?.results) ? dadosIds.results : []
+  return ids
 }
 
 async function buscarItensAutenticado() {
   const idsAnuncios = await buscarIdsAnunciosVendedor()
   if (!idsAnuncios.length) return []
 
-  const respostaItens = await mlFetch(`/items?ids=${idsAnuncios.join(',')}`)
-  if (!respostaItens.ok) {
-    const detalhe = await parseErroResposta(respostaItens, 'Nao foi possivel carregar detalhes dos anuncios.')
-    throw new Error(detalhe)
+  const tamanhoLote = 20
+  const lotes = []
+  for (let i = 0; i < idsAnuncios.length; i += tamanhoLote) {
+    lotes.push(idsAnuncios.slice(i, i + tamanhoLote))
   }
 
-  const dadosItens = await respostaItens.json()
-  return Array.isArray(dadosItens)
-    ? dadosItens.filter((x) => x?.code === 200 && x?.body).map((x) => x.body)
-    : []
+  const respostas = await Promise.all(
+    lotes.map(async (lote) => {
+      const respostaItens = await mlFetch(`/items?ids=${lote.join(',')}`)
+      if (!respostaItens.ok) {
+        const detalhe = await parseErroResposta(respostaItens, 'Nao foi possivel carregar detalhes dos anuncios.')
+        throw new Error(detalhe)
+      }
+      const dadosItens = await respostaItens.json()
+      return Array.isArray(dadosItens)
+        ? dadosItens.filter((x) => x?.code === 200 && x?.body).map((x) => x.body)
+        : []
+    })
+  )
+
+  return respostas.flat()
 }
 
 async function carregarAnunciosMercadoLivre() {
@@ -570,7 +587,7 @@ async function carregarAnuncios() {
       </label>
       <label v-if="marketplace === 'ml'">
         Seller ID
-        <input v-model="sellerId" type="text" placeholder="Ex.: 2278946593" />
+        <input v-model="sellerId" type="text" readonly />
       </label>
       <label v-else>
         Shop ID
@@ -583,7 +600,7 @@ async function carregarAnuncios() {
           v-model="accessToken"
           type="password"
           autocomplete="off"
-          placeholder="APP_USR-..."
+          readonly
         />
         <input
           v-else
@@ -600,10 +617,6 @@ async function carregarAnuncios() {
       <label v-if="marketplace === 'ml'">
         CEP (envio)
         <input v-model="cep" type="text" placeholder="Ex.: 01001000" />
-      </label>
-      <label v-if="marketplace === 'ml'">
-        Limite
-        <input v-model.number="limite" type="number" min="1" max="50" />
       </label>
       <label v-if="marketplace === 'ml'">
         Imposto %
