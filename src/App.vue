@@ -593,7 +593,7 @@ async function buscarItensAutenticado() {
 
 async function carregarAnunciosMercadoLivre(forcarAtualizacao = false) {
   const cache = forcarAtualizacao ? null : obterCacheAnuncios()
-  if (cache?.length) {
+  if (cache) {
     return cache.map(mapearItemParaLinha)
   }
 
