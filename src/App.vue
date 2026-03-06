@@ -16,6 +16,7 @@ const TAX_RATE_STORAGE_KEY = 'ml_tax_rate'
 const COSTS_STORAGE_KEY = 'ml_product_costs'
 const FREIGHTS_STORAGE_KEY = 'ml_freight_simulation'
 const THEME_STORAGE_KEY = 'ui_theme'
+const ADS_CACHE_STORAGE_KEY = 'ml_ads_cache_v1'
 
 const accessToken = ref('APP_USR-7222342522058077-030616-3ea319770fa421f3bcc17425dad5632d-2326962319')
 const shopeeAccessToken = ref(localStorage.getItem(SHOPEE_TOKEN_STORAGE_KEY) || '')
@@ -30,6 +31,7 @@ const filtroFreteGratis = ref('todos')
 const filtroMargemMinima = ref('')
 const chaveOrdenacao = ref('margemContribuicao')
 const direcaoOrdenacao = ref('desc')
+const ultimaAtualizacaoCache = ref('')
 
 const mapaTipos = {
   free: 'Gratis',
@@ -363,6 +365,10 @@ function alternarTema() {
   tema.value = tema.value === 'dark' ? 'light' : 'dark'
 }
 
+function esperar(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function parseErroResposta(resposta, padrao) {
   try {
     const body = await resposta.json()
@@ -387,6 +393,79 @@ async function mlFetch(url) {
   }
 
   return fetch(alvo.toString())
+}
+
+async function mlFetchComRetentativa(url, tentativas = 3) {
+  for (let tentativa = 0; tentativa < tentativas; tentativa += 1) {
+    const resposta = await mlFetch(url)
+    if (resposta.status !== 429 && resposta.status < 500) return resposta
+    if (tentativa === tentativas - 1) return resposta
+    await esperar(600 * (tentativa + 1))
+  }
+}
+
+function normalizarItemCache(item) {
+  return {
+    id: item.id,
+    title: item.title,
+    listing_type_id: item.listing_type_id,
+    category_id: item.category_id,
+    price: item.price,
+    shipping_cost: item.shipping_cost,
+    status: item.status,
+    available_quantity: item.available_quantity,
+    shipping: {
+      free_shipping: Boolean(item.shipping?.free_shipping)
+    }
+  }
+}
+
+function mapearItemParaLinha(item) {
+  return {
+    id: item.id,
+    titulo: item.title,
+    tipo: traduzirTipo(item.listing_type_id),
+    freteGratis: Boolean(item.shipping?.free_shipping),
+    valorVenda: obterNumero(item.price),
+    tarifaVenda: null,
+    fixedFee: null,
+    grossAmount: null,
+    percentageFee: null,
+    envios: obterNumero(item.shipping_cost),
+    freteOpcoes: []
+  }
+}
+
+function obterCacheAnuncios() {
+  try {
+    const bruto = localStorage.getItem(ADS_CACHE_STORAGE_KEY)
+    if (!bruto) return null
+    const dados = JSON.parse(bruto)
+    const seller = sellerId.value.trim()
+    const site = siteId.value.trim()
+    if (dados?.sellerId !== seller || dados?.siteId !== site) return null
+    if (!Array.isArray(dados?.items)) return null
+    ultimaAtualizacaoCache.value = dados.updatedAt || ''
+    return dados.items
+  } catch {
+    return null
+  }
+}
+
+function salvarCacheAnuncios(items) {
+  const payload = {
+    sellerId: sellerId.value.trim(),
+    siteId: siteId.value.trim(),
+    updatedAt: new Date().toISOString(),
+    items
+  }
+  localStorage.setItem(ADS_CACHE_STORAGE_KEY, JSON.stringify(payload))
+  ultimaAtualizacaoCache.value = payload.updatedAt
+}
+
+function limparCacheAnuncios() {
+  localStorage.removeItem(ADS_CACHE_STORAGE_KEY)
+  ultimaAtualizacaoCache.value = ''
 }
 
 async function buscarTarifaVenda(item) {
@@ -453,15 +532,18 @@ async function buscarEnvios(item) {
 
 async function buscarIdsAnunciosVendedor() {
   const seller = sellerId.value.trim()
-  const limitePagina = 50
-  let offset = 0
-  let total = null
+  const limitePagina = 100
+  let scrollId = ''
   const ids = []
 
-  while (total === null || offset < total) {
-    const respostaIds = await mlFetch(
-      `/users/${seller}/items/search?limit=${limitePagina}&offset=${offset}`
-    )
+  while (true) {
+    const params = new URLSearchParams({
+      search_type: 'scan',
+      limit: String(limitePagina)
+    })
+    if (scrollId) params.set('scroll_id', scrollId)
+
+    const respostaIds = await mlFetchComRetentativa(`/users/${seller}/items/search?${params.toString()}`)
 
     if (!respostaIds.ok) {
       const detalhe = await parseErroResposta(respostaIds, 'Nao foi possivel carregar os anuncios do vendedor.')
@@ -469,16 +551,17 @@ async function buscarIdsAnunciosVendedor() {
     }
 
     const dadosIds = await respostaIds.json()
+    if (!dadosIds) break
     const resultadosPagina = Array.isArray(dadosIds?.results) ? dadosIds.results : []
+    if (!resultadosPagina.length) break
     ids.push(...resultadosPagina)
 
-    total = Number(dadosIds?.paging?.total)
-    if (!Number.isFinite(total)) break
-    offset += resultadosPagina.length
-    if (!resultadosPagina.length) break
+    if (!dadosIds.scroll_id || dadosIds.scroll_id === scrollId) break
+    scrollId = dadosIds.scroll_id
+    await esperar(180)
   }
 
-  return ids
+  return [...new Set(ids)]
 }
 
 async function buscarItensAutenticado() {
@@ -486,57 +569,44 @@ async function buscarItensAutenticado() {
   if (!idsAnuncios.length) return []
 
   const tamanhoLote = 20
-  const lotes = []
+  const atributos =
+    'id,title,listing_type_id,category_id,price,shipping,shipping_cost,status,available_quantity'
+  const itens = []
+
   for (let i = 0; i < idsAnuncios.length; i += tamanhoLote) {
-    lotes.push(idsAnuncios.slice(i, i + tamanhoLote))
+    const lote = idsAnuncios.slice(i, i + tamanhoLote)
+    const respostaItens = await mlFetchComRetentativa(`/items?ids=${lote.join(',')}&attributes=${atributos}`)
+    if (!respostaItens.ok) {
+      const detalhe = await parseErroResposta(respostaItens, 'Nao foi possivel carregar detalhes dos anuncios.')
+      throw new Error(detalhe)
+    }
+    const dadosItens = await respostaItens.json()
+    const itensLote = Array.isArray(dadosItens)
+      ? dadosItens.filter((x) => x?.code === 200 && x?.body).map((x) => normalizarItemCache(x.body))
+      : []
+    itens.push(...itensLote)
+    await esperar(140)
   }
 
-  const respostas = await Promise.all(
-    lotes.map(async (lote) => {
-      const respostaItens = await mlFetch(`/items?ids=${lote.join(',')}`)
-      if (!respostaItens.ok) {
-        const detalhe = await parseErroResposta(respostaItens, 'Nao foi possivel carregar detalhes dos anuncios.')
-        throw new Error(detalhe)
-      }
-      const dadosItens = await respostaItens.json()
-      return Array.isArray(dadosItens)
-        ? dadosItens.filter((x) => x?.code === 200 && x?.body).map((x) => x.body)
-        : []
-    })
-  )
-
-  return respostas.flat()
+  return itens
 }
 
-async function carregarAnunciosMercadoLivre() {
+async function carregarAnunciosMercadoLivre(forcarAtualizacao = false) {
+  const cache = forcarAtualizacao ? null : obterCacheAnuncios()
+  if (cache?.length) {
+    return cache.map(mapearItemParaLinha)
+  }
+
   const resultados = await buscarItensAutenticado()
-
-  return Promise.all(
-    resultados.map(async (item) => {
-      const [tarifaInfo, envioInfo] = await Promise.all([buscarTarifaVenda(item), buscarEnvios(item)])
-
-      return {
-        id: item.id,
-        titulo: item.title,
-        tipo: traduzirTipo(item.listing_type_id),
-        freteGratis: Boolean(item.shipping?.free_shipping),
-        valorVenda: obterNumero(item.price),
-        tarifaVenda: tarifaInfo?.saleFeeAmount ?? null,
-        fixedFee: tarifaInfo?.fixedFee ?? null,
-        grossAmount: tarifaInfo?.grossAmount ?? null,
-        percentageFee: tarifaInfo?.percentageFee ?? null,
-        envios: obterNumero(envioInfo.envioSelecionado),
-        freteOpcoes: envioInfo.opcoes
-      }
-    })
-  )
+  salvarCacheAnuncios(resultados)
+  return resultados.map(mapearItemParaLinha)
 }
 
 async function carregarAnunciosShopee() {
   return []
 }
 
-async function carregarAnuncios() {
+async function carregarAnuncios(forcarAtualizacao = false) {
   erro.value = ''
   carregando.value = true
   anuncios.value = []
@@ -549,7 +619,8 @@ async function carregarAnuncios() {
       if (!accessToken.value.trim()) {
         throw new Error('Informe o Access Token.')
       }
-      anuncios.value = await carregarAnunciosMercadoLivre()
+      if (forcarAtualizacao) limparCacheAnuncios()
+      anuncios.value = await carregarAnunciosMercadoLivre(forcarAtualizacao)
     } else {
       erro.value = ''
       anuncios.value = await carregarAnunciosShopee()
@@ -625,6 +696,17 @@ async function carregarAnuncios() {
       <button type="submit" :disabled="carregando">
         {{ carregando ? 'Carregando...' : marketplace === 'ml' ? 'Buscar anuncios' : 'Atualizar calculo' }}
       </button>
+      <button
+        v-if="marketplace === 'ml'"
+        type="button"
+        :disabled="carregando"
+        @click="carregarAnuncios(true)"
+      >
+        Sincronizar da API
+      </button>
+      <small v-if="marketplace === 'ml' && ultimaAtualizacaoCache">
+        Cache local: {{ new Date(ultimaAtualizacaoCache).toLocaleString('pt-BR') }}
+      </small>
     </form>
 
     <section v-if="marketplace === 'shopee'" class="shopee-grid">
