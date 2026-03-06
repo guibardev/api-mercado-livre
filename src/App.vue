@@ -10,7 +10,6 @@ const limite = ref(20)
 const carregando = ref(false)
 const erro = ref('')
 const anuncios = ref([])
-const IDS_TESTE = ['MLB5321650590', 'MLB5321611740', 'MLB5321244626']
 
 const TOKEN_STORAGE_KEY = 'ml_access_token'
 const SHOPEE_TOKEN_STORAGE_KEY = 'shopee_access_token'
@@ -462,8 +461,25 @@ async function buscarEnvios(item) {
   return { envioSelecionado, opcoes }
 }
 
+async function buscarIdsAnunciosVendedor() {
+  const limiteNormalizado = Math.min(Math.max(Number(limite.value) || 20, 1), 50)
+  const seller = sellerId.value.trim()
+  const respostaIds = await mlFetch(`/users/${seller}/items/search?limit=${limiteNormalizado}`)
+
+  if (!respostaIds.ok) {
+    const detalhe = await parseErroResposta(respostaIds, 'Nao foi possivel carregar os anuncios do vendedor.')
+    throw new Error(detalhe)
+  }
+
+  const dadosIds = await respostaIds.json()
+  return Array.isArray(dadosIds?.results) ? dadosIds.results : []
+}
+
 async function buscarItensAutenticado() {
-  const respostaItens = await mlFetch(`/items?ids=${IDS_TESTE.join(',')}`)
+  const idsAnuncios = await buscarIdsAnunciosVendedor()
+  if (!idsAnuncios.length) return []
+
+  const respostaItens = await mlFetch(`/items?ids=${idsAnuncios.join(',')}`)
   if (!respostaItens.ok) {
     const detalhe = await parseErroResposta(respostaItens, 'Nao foi possivel carregar detalhes dos anuncios.')
     throw new Error(detalhe)
