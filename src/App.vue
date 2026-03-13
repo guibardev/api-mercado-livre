@@ -6,6 +6,7 @@ const sellerId = ref('2326962319')
 const marketplace = ref('ml')
 const shopeeShopId = ref('')
 const cep = ref('01001000')
+const filtroMlb = ref('')
 const carregando = ref(false)
 const erro = ref('')
 const anuncios = ref([])
@@ -104,6 +105,12 @@ function traduzirTipo(listingTypeId) {
 function obterNumero(valor) {
   const convertido = Number(valor)
   return Number.isFinite(convertido) ? convertido : null
+}
+
+function normalizarMlb(valor) {
+  return String(valor || '')
+    .trim()
+    .toUpperCase()
 }
 
 function obterCustoProduto(itemId) {
@@ -564,7 +571,26 @@ async function buscarIdsAnunciosVendedor() {
   return [...new Set(ids)]
 }
 
-async function buscarItensAutenticado() {
+async function buscarItemPorId(itemId) {
+  const atributos =
+    'id,title,listing_type_id,category_id,price,shipping,shipping_cost,status,available_quantity'
+  const respostaItem = await mlFetchComRetentativa(`/items/${itemId}?attributes=${atributos}`)
+
+  if (!respostaItem.ok) {
+    const detalhe = await parseErroResposta(respostaItem, 'Nao foi possivel carregar o anuncio informado.')
+    throw new Error(detalhe)
+  }
+
+  const item = await respostaItem.json()
+  return normalizarItemCache(item)
+}
+
+async function buscarItensAutenticado(itemId = '') {
+  const mlbInformado = normalizarMlb(itemId)
+  if (mlbInformado) {
+    return [await buscarItemPorId(mlbInformado)]
+  }
+
   const idsAnuncios = await buscarIdsAnunciosVendedor()
   if (!idsAnuncios.length) return []
 
@@ -592,13 +618,19 @@ async function buscarItensAutenticado() {
 }
 
 async function carregarAnunciosMercadoLivre(forcarAtualizacao = false) {
+  const mlbInformado = normalizarMlb(filtroMlb.value)
   const cache = forcarAtualizacao ? null : obterCacheAnuncios()
   if (cache) {
-    return cache.map(mapearItemParaLinha)
+    const itensCache = mlbInformado ? cache.filter((item) => item.id === mlbInformado) : cache
+    if (itensCache.length) {
+      return itensCache.map(mapearItemParaLinha)
+    }
   }
 
-  const resultados = await buscarItensAutenticado()
-  salvarCacheAnuncios(resultados)
+  const resultados = await buscarItensAutenticado(mlbInformado)
+  if (!mlbInformado) {
+    salvarCacheAnuncios(resultados)
+  }
   return resultados.map(mapearItemParaLinha)
 }
 
@@ -658,7 +690,7 @@ async function carregarAnuncios(forcarAtualizacao = false) {
       </label>
       <label v-if="marketplace === 'ml'">
         Seller ID
-        <input v-model="sellerId" type="text" readonly />
+        <input v-model="sellerId" type="text" placeholder="Ex.: 2326962319" />
       </label>
       <label v-else>
         Shop ID
@@ -671,7 +703,7 @@ async function carregarAnuncios(forcarAtualizacao = false) {
           v-model="accessToken"
           type="password"
           autocomplete="off"
-          readonly
+          placeholder="Cole o Access Token do Mercado Livre"
         />
         <input
           v-else
@@ -688,6 +720,10 @@ async function carregarAnuncios(forcarAtualizacao = false) {
       <label v-if="marketplace === 'ml'">
         CEP (envio)
         <input v-model="cep" type="text" placeholder="Ex.: 01001000" />
+      </label>
+      <label v-if="marketplace === 'ml'">
+        MLB do anuncio
+        <input v-model="filtroMlb" type="text" placeholder="Opcional. Ex.: MLB123456789" />
       </label>
       <label v-if="marketplace === 'ml'">
         Imposto %
