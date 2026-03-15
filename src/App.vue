@@ -2,10 +2,9 @@
 import { computed, ref, watch } from 'vue'
 
 const siteId = ref('MLB')
-const sellerId = ref('2326962319')
+const sellerId = ref('2423662839')
 const marketplace = ref('ml')
 const shopeeShopId = ref('')
-const cep = ref('01001000')
 const filtroMlb = ref('')
 const carregando = ref(false)
 const erro = ref('')
@@ -15,17 +14,16 @@ const TOKEN_STORAGE_KEY = 'ml_access_token'
 const SHOPEE_TOKEN_STORAGE_KEY = 'shopee_access_token'
 const TAX_RATE_STORAGE_KEY = 'ml_tax_rate'
 const COSTS_STORAGE_KEY = 'ml_product_costs'
-const FREIGHTS_STORAGE_KEY = 'ml_freight_simulation'
 const THEME_STORAGE_KEY = 'ui_theme'
 const ADS_CACHE_STORAGE_KEY = 'ml_ads_cache_v1'
 
-const accessToken = ref('APP_USR-7222342522058077-030616-3ea319770fa421f3bcc17425dad5632d-2326962319')
+const accessToken = ref('APP_USR-5515065216049432-031500-1b91f907d1ebc97f7d2f1c64abd88183-2423662839')
 const shopeeAccessToken = ref(localStorage.getItem(SHOPEE_TOKEN_STORAGE_KEY) || '')
 const aliquotaImposto = ref(Number(localStorage.getItem(TAX_RATE_STORAGE_KEY) || 12))
 const custoProdutosById = ref(JSON.parse(localStorage.getItem(COSTS_STORAGE_KEY) || '{}'))
-const freteSimuladoById = ref(JSON.parse(localStorage.getItem(FREIGHTS_STORAGE_KEY) || '{}'))
 const tema = ref(localStorage.getItem(THEME_STORAGE_KEY) || 'dark')
 const API_BASE = import.meta.env.DEV ? '/ml' : 'https://api.mercadolibre.com'
+const SALE_PRICE_CONTEXT = 'channel_marketplace,buyer_loyalty_3'
 
 const filtroTipo = ref('todos')
 const filtroFreteGratis = ref('todos')
@@ -39,8 +37,8 @@ const mapaTipos = {
   bronze: 'Bronze',
   silver: 'Prata',
   gold: 'Ouro',
-  gold_pro: 'Classico',
-  gold_special: 'Premium',
+  gold_pro: 'Premium',
+  gold_special: 'Classico',
   gold_premium: 'Premium Plus'
 }
 
@@ -82,14 +80,6 @@ watch(
   { deep: true }
 )
 
-watch(
-  freteSimuladoById,
-  (novoMapa) => {
-    localStorage.setItem(FREIGHTS_STORAGE_KEY, JSON.stringify(novoMapa))
-  },
-  { deep: true }
-)
-
 const formatarMoeda = (valor) =>
   typeof valor === 'number'
     ? valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
@@ -105,6 +95,11 @@ function traduzirTipo(listingTypeId) {
 function obterNumero(valor) {
   const convertido = Number(valor)
   return Number.isFinite(convertido) ? convertido : null
+}
+
+function calcularTaxaPorPercentual(preco, percentual) {
+  if (typeof preco !== 'number' || typeof percentual !== 'number') return null
+  return preco * (percentual / 100)
 }
 
 function normalizarMlb(valor) {
@@ -123,43 +118,21 @@ function atualizarCustoProduto(itemId, valorDigitado) {
   custoProdutosById.value[itemId] = Number.isFinite(valor) && valor >= 0 ? valor : 0
 }
 
-function obterFreteSimulado(itemId) {
-  const valor = Number(freteSimuladoById.value[itemId])
-  return Number.isFinite(valor) && valor >= 0 ? valor : null
-}
-
-function atualizarFreteSimulado(itemId, valorDigitado) {
-  const texto = String(valorDigitado || '').trim()
-  if (texto === '') {
-    delete freteSimuladoById.value[itemId]
-    return
-  }
-  const valor = Number(texto)
-  freteSimuladoById.value[itemId] = Number.isFinite(valor) && valor >= 0 ? valor : null
-}
-
-function obterFreteUsado(anuncio) {
-  const simulado = obterFreteSimulado(anuncio.id)
-  if (typeof simulado === 'number') return simulado
-  return anuncio.envios
-}
-
 function calcularImpostoProduto(anuncio) {
   if (typeof anuncio.valorVenda !== 'number') return null
   return anuncio.valorVenda * (Number(aliquotaImposto.value || 0) / 100)
 }
 
 function calcularTotalLiquido(anuncio) {
-  const freteUsado = obterFreteUsado(anuncio)
   if (
     typeof anuncio.valorVenda !== 'number' ||
     typeof anuncio.tarifaVenda !== 'number' ||
-    typeof freteUsado !== 'number'
+    typeof anuncio.envios !== 'number'
   ) {
     return null
   }
 
-  return anuncio.valorVenda - anuncio.tarifaVenda - freteUsado
+  return anuncio.valorVenda - anuncio.tarifaVenda - anuncio.envios
 }
 
 function calcularMargemContribuicao(anuncio) {
@@ -201,7 +174,6 @@ function indicadorOrdenacao(chave) {
 
 function valorOrdenavel(row, chave) {
   if (chave === 'custoProduto') return obterCustoProduto(row.id)
-  if (chave === 'freteUsado') return obterFreteUsado(row)
   return row[chave]
 }
 
@@ -433,14 +405,50 @@ function mapearItemParaLinha(item) {
     titulo: item.title,
     tipo: traduzirTipo(item.listing_type_id),
     freteGratis: Boolean(item.shipping?.free_shipping),
+    promocaoAtiva: false,
     valorVenda: obterNumero(item.price),
+    precoSemPromocao: obterNumero(item.price),
+    precoComPromocao: null,
     tarifaVenda: null,
+    taxaSemPromocao: null,
+    taxaComPromocao: null,
     fixedFee: null,
     grossAmount: null,
     percentageFee: null,
     envios: obterNumero(item.shipping_cost),
     freteOpcoes: []
   }
+}
+
+async function enriquecerLinhaAnuncio(item) {
+  const linhaBase = mapearItemParaLinha(item)
+  const [tarifa, precosVenda] = await Promise.all([buscarTarifaVenda(item), buscarPrecosVenda(item)])
+  const precoReferenciaFrete =
+    precosVenda?.precoComPromocao ?? precosVenda?.precoSemPromocao ?? linhaBase.valorVenda
+  const envio = await buscarEnvios(item, precoReferenciaFrete)
+
+  return {
+    ...linhaBase,
+    valorVenda: precosVenda?.precoComPromocao ?? precosVenda?.precoSemPromocao ?? linhaBase.valorVenda,
+    promocaoAtiva: typeof precosVenda?.precoComPromocao === 'number',
+    precoSemPromocao: precosVenda?.precoSemPromocao ?? linhaBase.precoSemPromocao,
+    precoComPromocao: precosVenda?.precoComPromocao ?? null,
+    tarifaVenda:
+      calcularTaxaPorPercentual(precosVenda?.precoComPromocao, tarifa?.percentageFee) ??
+      calcularTaxaPorPercentual(precosVenda?.precoSemPromocao, tarifa?.percentageFee) ??
+      null,
+    taxaSemPromocao: calcularTaxaPorPercentual(precosVenda?.precoSemPromocao, tarifa?.percentageFee),
+    taxaComPromocao: calcularTaxaPorPercentual(precosVenda?.precoComPromocao, tarifa?.percentageFee),
+    fixedFee: tarifa?.fixedFee ?? null,
+    grossAmount: tarifa?.grossAmount ?? null,
+    percentageFee: tarifa?.percentageFee ?? null,
+    envios: envio?.envioSelecionado ?? linhaBase.envios,
+    freteOpcoes: envio?.opcoes ?? []
+  }
+}
+
+async function enriquecerLinhasAnuncios(items) {
+  return Promise.all(items.map((item) => enriquecerLinhaAnuncio(item)))
 }
 
 function obterCacheAnuncios() {
@@ -502,39 +510,47 @@ async function buscarTarifaVenda(item) {
   }
 }
 
-async function buscarEnvios(item) {
+async function buscarPrecosVenda(item) {
+  const resposta = await mlFetch(`/items/${item.id}/sale_price?context=${SALE_PRICE_CONTEXT}`)
+  if (!resposta.ok) {
+    return {
+      precoSemPromocao: obterNumero(item.price),
+      precoComPromocao: null
+    }
+  }
+
+  const dados = await resposta.json()
+  return {
+    precoSemPromocao: obterNumero(dados.regular_amount) ?? obterNumero(item.price),
+    precoComPromocao: obterNumero(dados.amount)
+  }
+}
+
+async function buscarEnvios(item, precoReferencia) {
   const fallbackEnvio =
     typeof item.shipping_cost === 'number' ? item.shipping_cost : item.shipping?.free_shipping ? 0 : null
 
-  if (item.status !== 'active' || Number(item.available_quantity || 0) <= 0) {
+  if (!item.id || !item.listing_type_id || typeof precoReferencia !== 'number') {
     return { envioSelecionado: fallbackEnvio, opcoes: [] }
   }
 
-  if (!cep.value) {
-    return { envioSelecionado: fallbackEnvio, opcoes: [] }
-  }
+  const params = new URLSearchParams({
+    logistic_type: 'drop_off',
+    item_price: String(precoReferencia),
+    listing_type_id: item.listing_type_id,
+    item_id: item.id
+  })
 
-  const resposta = await mlFetch(`/items/${item.id}/shipping_options?zip_code=${cep.value}`)
+  const resposta = await mlFetch(`/users/${sellerId.value.trim()}/shipping_options/free?${params.toString()}`)
   if (!resposta.ok) {
     return { envioSelecionado: fallbackEnvio, opcoes: [] }
   }
 
   const dados = await resposta.json()
-  const opcoes = Array.isArray(dados.options)
-    ? dados.options.map((opcao) => ({
-        nome: opcao.name || 'Opcao',
-        tipo: opcao.shipping_method_type || '',
-        display: opcao.display || '',
-        baseCost: obterNumero(opcao.base_cost),
-        cost: obterNumero(opcao.cost),
-        listCost: obterNumero(opcao.list_cost)
-      }))
-    : []
-
-  const opcaoSelecionada = opcoes.find((opcao) => opcao.display === 'recommended') || opcoes[0] || null
-  const envioSelecionado = opcaoSelecionada?.cost ?? opcaoSelecionada?.listCost ?? fallbackEnvio
-
-  return { envioSelecionado, opcoes }
+  return {
+    envioSelecionado: obterNumero(dados?.coverage?.all_country?.list_cost) ?? fallbackEnvio,
+    opcoes: []
+  }
 }
 
 async function buscarIdsAnunciosVendedor() {
@@ -623,7 +639,7 @@ async function carregarAnunciosMercadoLivre(forcarAtualizacao = false) {
   if (cache) {
     const itensCache = mlbInformado ? cache.filter((item) => item.id === mlbInformado) : cache
     if (itensCache.length) {
-      return itensCache.map(mapearItemParaLinha)
+      return enriquecerLinhasAnuncios(itensCache)
     }
   }
 
@@ -631,7 +647,7 @@ async function carregarAnunciosMercadoLivre(forcarAtualizacao = false) {
   if (!mlbInformado) {
     salvarCacheAnuncios(resultados)
   }
-  return resultados.map(mapearItemParaLinha)
+  return enriquecerLinhasAnuncios(resultados)
 }
 
 async function carregarAnunciosShopee() {
@@ -716,10 +732,6 @@ async function carregarAnuncios(forcarAtualizacao = false) {
       <label v-if="marketplace === 'ml'">
         Site
         <input v-model="siteId" type="text" />
-      </label>
-      <label v-if="marketplace === 'ml'">
-        CEP (envio)
-        <input v-model="cep" type="text" placeholder="Ex.: 01001000" />
       </label>
       <label v-if="marketplace === 'ml'">
         MLB do anuncio
@@ -895,22 +907,19 @@ async function carregarAnuncios(forcarAtualizacao = false) {
             <th>
               <button class="sort-btn" @click="trocarOrdenacao('freteGratis')">Frete gratis {{ indicadorOrdenacao('freteGratis') }}</button>
             </th>
+            <th>Promocao ativa</th>
             <th>
-              <button class="sort-btn" @click="trocarOrdenacao('valorVenda')">Valor venda {{ indicadorOrdenacao('valorVenda') }}</button>
+              Preco sem promo
             </th>
-            <th>
-              <button class="sort-btn" @click="trocarOrdenacao('tarifaVenda')">Tarifa ML {{ indicadorOrdenacao('tarifaVenda') }}</button>
-            </th>
+            <th>Preco com promo</th>
+            <th>Taxa sem promo</th>
+            <th>Taxa com promo</th>
             <th>Gross</th>
             <th>Fixed fee</th>
             <th>% fee</th>
             <th>
               <button class="sort-btn" @click="trocarOrdenacao('envios')">Envios {{ indicadorOrdenacao('envios') }}</button>
             </th>
-            <th>
-              <button class="sort-btn" @click="trocarOrdenacao('freteUsado')">Frete usado {{ indicadorOrdenacao('freteUsado') }}</button>
-            </th>
-            <th>Fretes</th>
             <th>
               <button class="sort-btn" @click="trocarOrdenacao('totalLiquido')">Total liquido {{ indicadorOrdenacao('totalLiquido') }}</button>
             </th>
@@ -928,42 +937,22 @@ async function carregarAnuncios(forcarAtualizacao = false) {
         </thead>
         <tbody>
           <tr v-if="!carregando && linhasFiltradasOrdenadas.length === 0">
-            <td colspan="17">Nenhum anuncio para os filtros aplicados.</td>
+            <td colspan="18">Nenhum anuncio para os filtros aplicados.</td>
           </tr>
           <tr v-for="linha in linhasFiltradasOrdenadas" :key="linha.id">
             <td class="sticky-col">{{ linha.id }}</td>
             <td>{{ linha.titulo }}</td>
             <td>{{ linha.tipo }}</td>
             <td>{{ linha.freteGratis ? 'Sim' : 'Nao' }}</td>
-            <td>{{ formatarMoeda(linha.valorVenda) }}</td>
-            <td>{{ formatarMoeda(linha.tarifaVenda) }}</td>
+            <td>{{ linha.promocaoAtiva ? 'Sim' : 'Nao' }}</td>
+            <td>{{ formatarMoeda(linha.precoSemPromocao) }}</td>
+            <td>{{ formatarMoeda(linha.precoComPromocao) }}</td>
+            <td>{{ formatarMoeda(linha.taxaSemPromocao) }}</td>
+            <td>{{ formatarMoeda(linha.taxaComPromocao) }}</td>
             <td>{{ formatarMoeda(linha.grossAmount) }}</td>
             <td>{{ formatarMoeda(linha.fixedFee) }}</td>
             <td>{{ formatarPercentual(linha.percentageFee) }}</td>
             <td>{{ formatarMoeda(linha.envios) }}</td>
-            <td>
-              <input
-                class="input-custo"
-                type="number"
-                min="0"
-                step="0.01"
-                :value="obterFreteSimulado(linha.id) ?? ''"
-                placeholder="API"
-                @input="atualizarFreteSimulado(linha.id, $event.target.value)"
-              />
-              <div class="frete-api">API: {{ formatarMoeda(linha.envios) }}</div>
-            </td>
-            <td>
-              <details v-if="linha.freteOpcoes?.length" class="fretes-detalhe">
-                <summary>{{ linha.freteOpcoes.length }} opcoes</summary>
-                <div class="fretes-lista">
-                  <div v-for="(opcao, idx) in linha.freteOpcoes" :key="`${linha.id}-${idx}`">
-                    {{ opcao.nome }} / {{ opcao.tipo || 'N/D' }}: {{ formatarMoeda(opcao.cost) }}
-                  </div>
-                </div>
-              </details>
-              <span v-else>N/D</span>
-            </td>
             <td>{{ formatarMoeda(linha.totalLiquido) }}</td>
             <td>
               <input
@@ -980,13 +969,6 @@ async function carregarAnuncios(forcarAtualizacao = false) {
             <td :class="classeMargem(linha.margemContribuicao)">{{ formatarPercentual(linha.margemPercentual) }}</td>
           </tr>
         </tbody>
-        <tfoot v-if="linhasFiltradasOrdenadas.length > 0">
-          <tr>
-            <td colspan="15">Total de margem de contribuicao (filtros atuais)</td>
-            <td class="margem-boa">{{ formatarMoeda(totalMargem) }}</td>
-            <td></td>
-          </tr>
-        </tfoot>
       </table>
     </div>
 
@@ -996,22 +978,12 @@ async function carregarAnuncios(forcarAtualizacao = false) {
         <p><strong>ID:</strong> {{ linha.id }}</p>
         <p><strong>Tipo:</strong> {{ linha.tipo }}</p>
         <p><strong>Frete gratis:</strong> {{ linha.freteGratis ? 'Sim' : 'Nao' }}</p>
-        <p><strong>Valor venda:</strong> {{ formatarMoeda(linha.valorVenda) }}</p>
-        <p><strong>Tarifa ML:</strong> {{ formatarMoeda(linha.tarifaVenda) }}</p>
+        <p><strong>Promocao ativa:</strong> {{ linha.promocaoAtiva ? 'Sim' : 'Nao' }}</p>
+        <p><strong>Preco sem promocao:</strong> {{ formatarMoeda(linha.precoSemPromocao) }}</p>
+        <p><strong>Preco com promocao:</strong> {{ formatarMoeda(linha.precoComPromocao) }}</p>
+        <p><strong>Taxa sem promocao:</strong> {{ formatarMoeda(linha.taxaSemPromocao) }}</p>
+        <p><strong>Taxa com promocao:</strong> {{ formatarMoeda(linha.taxaComPromocao) }}</p>
         <p><strong>Envios (API):</strong> {{ formatarMoeda(linha.envios) }}</p>
-        <p><strong>Frete usado:</strong> {{ formatarMoeda(obterFreteUsado(linha)) }}</p>
-        <p>
-          <strong>Frete simulado:</strong>
-          <input
-            class="input-custo"
-            type="number"
-            min="0"
-            step="0.01"
-            :value="obterFreteSimulado(linha.id) ?? ''"
-            placeholder="API"
-            @input="atualizarFreteSimulado(linha.id, $event.target.value)"
-          />
-        </p>
         <p><strong>Total liquido:</strong> {{ formatarMoeda(linha.totalLiquido) }}</p>
         <p><strong>Imposto:</strong> {{ formatarMoeda(linha.impostoProduto) }}</p>
         <p :class="classeMargem(linha.margemContribuicao)">
